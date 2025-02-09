@@ -6,6 +6,10 @@ import (
 	"sync"
 )
 
+// used payment strategy pattern
+// used state pattern for vending machine states
+// used mutex for thread safety
+
 // Product represents a product in the vending machine
 type Product struct {
 	Name     string
