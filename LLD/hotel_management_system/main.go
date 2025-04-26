@@ -111,3 +111,15 @@ func main() {
 	room := Room{}
 	hotelManagementSystem.BookingService.BookRoom(room, cardPayment)
 }
+
+func (h *HotelManagementSystem) BookRoom(room Room, paymentService IPaymentService) error {
+	return h.BookingService.BookRoom(room, paymentService)
+}
+
+func (h *HotelManagementSystem) MakePayment(amount float64) error {
+	return h.PaymentService.MakePayment(amount)
+}
+
+func (h *HotelManagementSystem) GetAvailableRooms() []Room {
+	return h.roomService.GetAvailableRooms()
+}

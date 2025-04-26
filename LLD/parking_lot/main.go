@@ -1,57 +1,61 @@
 package main
 
-import "fmt"
-
-type ParkingLotService struct {
-	ticketingService ITicketingService
-	parkingSerivce   IParkingService
+type IParkingService interface {
+	ParkVehicle(vehicle Vehicle) error
+	UnparkVehicle(vehicle Vehicle) error
 }
 
 type Vehicle struct {
 	NumberPlate string
-	Type        string
+	Color       string
+	Type        VehicleType
 }
 
-func NewParkingLotService(ticketingService ITicketingService, parkingSerivce IParkingService) *ParkingLotService {
-	return &ParkingLotService{
-		ticketingService: ticketingService,
-		parkingSerivce:   parkingSerivce,
-	}
+type VehicleType int
+
+const (
+	Car VehicleType = iota
+	Bike
+)
+
+type IparkingRepo interface {
+	UpdateSpot() error
+	GetSpot() error
 }
 
-type ITicketingService interface {
-	GenerateTicket() string
+type ParkingRepo struct {
+	parkingSpots map[int]*ParkingSpot
 }
 
-type TicketingService struct {
+type ParkingSpot struct {
+	ID     int
+	Level  int
+	status bool
 }
 
-func (t *TicketingService) GenerateTicket() string {
-	return "ticket"
+type IPaymentService interface {
+	MakePayment() error
 }
 
-type IParkingService interface {
-	ParkVehicle(vehicle Vehicle) error
+type CardService struct {
 }
 
-type ParkingService struct {
-}
-
-func (p *ParkingService) ParkVehicle(vehicle Vehicle) error {
-	fmt.Println("move vehicle to parking lot")
+func (c *CardService) MakePayment() error {
 	return nil
 }
 
-func main() {
-	ticketingService := &TicketingService{}
-	parkingService := &ParkingService{}
+type CashService struct {
+}
 
-	parkingLotService := NewParkingLotService(ticketingService, parkingService)
+func (c *CashService) MakePayment() error {
+	return nil
+}
 
-	vehicle := Vehicle{
-		NumberPlate: "123",
-		Type:        "car",
-	}
+type ParkingService struct {
+	parkingRepo IparkingRepo
+	paymentServ IPaymentService
+}
 
-	parkingLotService.parkingSerivce.ParkVehicle(vehicle)
+func (p *ParkingService) ParkVehicle(vehicle Vehicle) error {
+	getParkingFactory
 }
