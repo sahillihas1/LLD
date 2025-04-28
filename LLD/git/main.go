@@ -2,174 +2,217 @@ package main
 
 import (
 	"fmt"
+	"time"
 )
 
-// ----------------------------
-// File Model
-// ----------------------------
+// File represents a basic file structure.
 type File struct {
 	Name    string
 	Content string
 }
 
-func NewFile(name, content string) File {
-	return File{Name: name, Content: content}
+// ICommit defines the contract for a commit.
+type ICommit interface {
+	GetID() int
+	GetFiles() map[string]string
+	GetMessage() string
+	GetTimestamp() time.Time
+	GetParent() ICommit
 }
 
-// ----------------------------
-// Commit Model
-// ----------------------------
+// Commit is the concrete implementation of ICommit.
 type Commit struct {
-	Message string
-	Files   []File
+	id        int
+	files     map[string]string
+	message   string
+	timestamp time.Time
+	parent    ICommit
 }
 
-func NewCommit(message string, files []File) Commit {
-	copied := make([]File, len(files))
-	copy(copied, files)
-	return Commit{
-		Message: message,
-		Files:   copied,
-	}
+func (c *Commit) GetID() int                  { return c.id }
+func (c *Commit) GetFiles() map[string]string { return c.files }
+func (c *Commit) GetMessage() string          { return c.message }
+func (c *Commit) GetTimestamp() time.Time     { return c.timestamp }
+func (c *Commit) GetParent() ICommit          { return c.parent }
+
+// IBranch defines the contract for a branch.
+type IBranch interface {
+	GetName() string
+	GetHead() ICommit
+	SetHead(commit ICommit)
+	AddCommit(commit ICommit)
+	GetCommits() []ICommit
+	SetCommits(commits []ICommit)
 }
 
-// ----------------------------
-// Branch Model
-// ----------------------------
+// Branch is the concrete implementation of IBranch.
 type Branch struct {
-	Name    string
-	Commits []Commit
-	Staged  []File
+	name       string
+	head       ICommit
+	commitList []ICommit
 }
 
-func NewBranch(name string) *Branch {
-	return &Branch{
-		Name:    name,
-		Commits: []Commit{},
-		Staged:  []File{},
+func (b *Branch) GetName() string              { return b.name }
+func (b *Branch) GetHead() ICommit             { return b.head }
+func (b *Branch) SetHead(commit ICommit)       { b.head = commit }
+func (b *Branch) AddCommit(commit ICommit)     { b.commitList = append(b.commitList, commit) }
+func (b *Branch) GetCommits() []ICommit        { return b.commitList }
+func (b *Branch) SetCommits(commits []ICommit) { b.commitList = commits }
+
+// ICommand defines the command interface for actions like commit, add, rollback.
+type ICommand interface {
+	Execute()
+}
+
+// AddFileCommand adds a file to the staging area.
+type AddFileCommand struct {
+	vc   *VersionControl
+	file File
+}
+
+func (cmd *AddFileCommand) Execute() {
+	cmd.vc.stagingArea[cmd.file.Name] = cmd.file.Content
+}
+
+// CommitCommand handles committing staged files.
+type CommitCommand struct {
+	vc      *VersionControl
+	message string
+}
+
+func (cmd *CommitCommand) Execute() {
+	files := make(map[string]string)
+	head := cmd.vc.current.GetHead()
+	if head != nil {
+		for k, v := range head.GetFiles() {
+			files[k] = v
+		}
 	}
+	for k, v := range cmd.vc.stagingArea {
+		files[k] = v
+	}
+	commit := &Commit{
+		id:        cmd.vc.commitID,
+		files:     files,
+		message:   cmd.message,
+		timestamp: time.Now(),
+		parent:    head,
+	}
+	cmd.vc.current.SetHead(commit)
+	cmd.vc.current.AddCommit(commit)
+	cmd.vc.commitID++
+	cmd.vc.stagingArea = make(map[string]string)
 }
 
-func (b *Branch) StageFile(f File) {
-	b.Staged = append(b.Staged, f)
+// RollbackCommand handles rollback functionality.
+type RollbackCommand struct {
+	vc       *VersionControl
+	commitID int
 }
 
-func (b *Branch) Commit(msg string) {
-	if len(b.Staged) == 0 {
-		fmt.Println("Nothing to commit.")
+func (cmd *RollbackCommand) Execute() {
+	commits := cmd.vc.current.GetCommits()
+	for i := len(commits) - 1; i >= 0; i-- {
+		if commits[i].GetID() == cmd.commitID {
+			cmd.vc.current.SetHead(commits[i])
+			cmd.vc.current.SetCommits(commits[:i+1])
+			fmt.Println("Rolled back to commit", cmd.commitID)
+			return
+		}
+	}
+	fmt.Println("Commit ID not found")
+}
+
+// RevertCommand reverts to a specific commit, preserving history.
+type RevertCommand struct {
+	vc       *VersionControl
+	commitID int
+}
+
+func (cmd *RevertCommand) Execute() {
+	var target ICommit
+	for _, c := range cmd.vc.current.GetCommits() {
+		if c.GetID() == cmd.commitID {
+			target = c
+			break
+		}
+	}
+	if target == nil {
+		fmt.Println("Commit ID not found")
 		return
 	}
-	newCommit := NewCommit(msg, b.Staged)
-	b.Commits = append(b.Commits, newCommit)
-	b.Staged = []File{}
-	fmt.Printf("Committed to branch '%s': %s\n", b.Name, msg)
-}
 
-func (b *Branch) Clone(newName string) *Branch {
-	newBranch := NewBranch(newName)
-	newBranch.Commits = append(newBranch.Commits, b.Commits...)
-	return newBranch
-}
-
-func (b *Branch) Rollback() {
-	if len(b.Commits) == 0 {
-		fmt.Println("Nothing to rollback.")
-		return
+	head := cmd.vc.current.GetHead()
+	revertCommit := &Commit{
+		id:        cmd.vc.commitID,
+		files:     target.GetFiles(),
+		message:   fmt.Sprintf("Revert to commit %d", cmd.commitID),
+		timestamp: time.Now(),
+		parent:    head,
 	}
-	b.Commits = b.Commits[:len(b.Commits)-1]
-	fmt.Println("Rollback successful.")
+	cmd.vc.current.SetHead(revertCommit)
+	cmd.vc.current.AddCommit(revertCommit)
+	cmd.vc.commitID++
+	fmt.Println("Reverted to commit", cmd.commitID)
 }
 
-func (b *Branch) ShowCommits() {
-	fmt.Printf("\nCommits on branch '%s':\n", b.Name)
-	for i, c := range b.Commits {
-		fmt.Printf("  %d. %s\n", i+1, c.Message)
+// VersionControl orchestrates version control features.
+type VersionControl struct {
+	branches    map[string]IBranch
+	current     IBranch
+	stagingArea map[string]string
+	commitID    int
+}
+
+func NewVersionControl() *VersionControl {
+	master := &Branch{name: "master"}
+	vc := &VersionControl{
+		branches:    map[string]IBranch{"master": master},
+		current:     master,
+		stagingArea: make(map[string]string),
+		commitID:    0,
 	}
-	fmt.Println()
+	return vc
 }
 
-// ----------------------------
-// Version Control Interface
-// ----------------------------
-type VersionControl interface {
-	AddFile(name, content string)
-	Commit(message string)
-	CreateBranch(name string)
-	SwitchBranch(name string)
-	Rollback()
-	ShowHistory()
+func (vc *VersionControl) RunCommand(cmd ICommand) {
+	cmd.Execute()
 }
 
-// ----------------------------
-// Git System Implementation
-// ----------------------------
-type GitSystem struct {
-	Branches   map[string]*Branch
-	CurrBranch *Branch
-}
-
-func NewGitSystem() VersionControl {
-	main := NewBranch("main")
-	return &GitSystem{
-		Branches:   map[string]*Branch{"main": main},
-		CurrBranch: main,
+func (vc *VersionControl) CreateBranch(name string) {
+	newBranch := &Branch{
+		name:       name,
+		head:       vc.current.GetHead(),
+		commitList: append([]ICommit{}, vc.current.GetCommits()...),
 	}
+	vc.branches[name] = newBranch
 }
 
-func (g *GitSystem) AddFile(name, content string) {
-	g.CurrBranch.StageFile(NewFile(name, content))
-}
-
-func (g *GitSystem) Commit(message string) {
-	g.CurrBranch.Commit(message)
-}
-
-func (g *GitSystem) CreateBranch(name string) {
-	if _, exists := g.Branches[name]; exists {
-		fmt.Printf("Branch '%s' already exists.\n", name)
-		return
-	}
-	g.Branches[name] = g.CurrBranch.Clone(name)
-	fmt.Printf("Branch '%s' created.\n", name)
-}
-
-func (g *GitSystem) SwitchBranch(name string) {
-	if branch, ok := g.Branches[name]; ok {
-		g.CurrBranch = branch
-		fmt.Printf("Switched to branch '%s'\n", name)
+func (vc *VersionControl) CheckoutBranch(name string) {
+	if branch, ok := vc.branches[name]; ok {
+		vc.current = branch
 	} else {
-		fmt.Printf("Branch '%s' does not exist.\n", name)
+		fmt.Println("Branch does not exist")
 	}
 }
 
-func (g *GitSystem) Rollback() {
-	g.CurrBranch.Rollback()
-}
-
-func (g *GitSystem) ShowHistory() {
-	g.CurrBranch.ShowCommits()
-}
-
-// ----------------------------
-// Main Function (Testing)
-// ----------------------------
 func main() {
-	vcs := NewGitSystem()
+	vc := NewVersionControl()
 
-	vcs.AddFile("file1.txt", "Hello World")
-	vcs.Commit("Initial commit")
+	vc.RunCommand(&AddFileCommand{vc, File{"file1.txt", "Hello World"}})
+	vc.RunCommand(&CommitCommand{vc, "Initial commit"})
 
-	vcs.CreateBranch("feature-x")
-	vcs.SwitchBranch("feature-x")
+	vc.RunCommand(&AddFileCommand{vc, File{"file2.txt", "Another file"}})
+	vc.RunCommand(&CommitCommand{vc, "Added file2"})
 
-	vcs.AddFile("file2.txt", "Feature X started")
-	vcs.Commit("Feature X - First Commit")
+	vc.CreateBranch("feature")
+	vc.CheckoutBranch("feature")
 
-	vcs.ShowHistory()
+	vc.RunCommand(&AddFileCommand{vc, File{"file1.txt", "Updated in feature"}})
+	vc.RunCommand(&CommitCommand{vc, "Updated file1 in feature branch"})
 
-	vcs.Rollback()
-	vcs.ShowHistory()
+	vc.RunCommand(&RevertCommand{vc, 0}) // Revert to first commit while preserving history
 
-	vcs.SwitchBranch("main")
-	vcs.ShowHistory()
+	fmt.Println("Current HEAD ID:", vc.current.GetHead().GetID())
+	fmt.Println("Current HEAD files:", vc.current.GetHead().GetFiles())
 }

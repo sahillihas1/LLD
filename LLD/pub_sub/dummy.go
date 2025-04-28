@@ -194,9 +194,9 @@ func main() {
 	_ = topicService.Publish("technology", "Message 3: Self-driving cars 2.0 announced!")
 	time.Sleep(2 * time.Second)
 
-	// ---- Change Offset Manually ----
-	//fmt.Println("=== Resetting offset to 1 ===")
-	//sub.SetOffset(1)
+	//---- Change Offset Manually ----
+	fmt.Println("=== Resetting offset to 1 ===")
+	sub.SetOffset(1)
 
 	time.Sleep(5 * time.Second) // Let consumer reconsume from offset 1
 }

@@ -3,208 +3,389 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
-//////////////////////////////////////////////////////
-// 🧱 Core Entities
-//////////////////////////////////////////////////////
+type Operator string
 
-type Column struct {
-	Name string
-	Type string
+const (
+	Eq  Operator = "=="
+	Gt  Operator = ">"
+	Lt  Operator = "<"
+	Gte Operator = ">="
+	Lte Operator = "<="
+)
+
+type LogicalOperator string
+
+const (
+	And LogicalOperator = "AND"
+	Or  LogicalOperator = "OR"
+)
+
+// Query interface (Composite Pattern)
+type Query interface {
+	Evaluate(row map[string]interface{}) bool
 }
 
-type Row map[string]interface{}
-
-//////////////////////////////////////////////////////
-// 🧠 Strategy Pattern for Filtering
-//////////////////////////////////////////////////////
-
-type FilterStrategy interface {
-	Match(row Row) bool
+// Leaf: Single Condition
+type Condition struct {
+	Column   string
+	Operator Operator
+	Value    interface{}
 }
 
-type EqualFilter struct {
-	Column string
-	Value  interface{}
-}
-
-func (f EqualFilter) Match(row Row) bool {
-	val, exists := row[f.Column]
-	return exists && val == f.Value
-}
-
-//////////////////////////////////////////////////////
-// 🗃️ Repository Interface (Interface Segregation)
-//////////////////////////////////////////////////////
-
-type TableRepository interface {
-	Insert(row Row) error
-	Select(filters []FilterStrategy) ([]Row, error)
-	Update(filters []FilterStrategy, updates Row) error
-	Delete(filters []FilterStrategy) error
-}
-
-//////////////////////////////////////////////////////
-// 💾 In-Memory Table Implementation (SRP)
-//////////////////////////////////////////////////////
-
-type InMemoryTable struct {
-	Columns []Column
-	Rows    []Row
-}
-
-func (t *InMemoryTable) validate(row Row) error {
-	for _, col := range t.Columns {
-		if _, ok := row[col.Name]; !ok {
-			return errors.New("missing column: " + col.Name)
-		}
+func (c *Condition) Evaluate(row map[string]interface{}) bool {
+	val, exists := row[c.Column]
+	if !exists {
+		return false
 	}
-	return nil
+	return compare(val, c.Value, c.Operator)
 }
 
-func (t *InMemoryTable) Insert(row Row) error {
-	if err := t.validate(row); err != nil {
-		return err
-	}
-	t.Rows = append(t.Rows, row)
-	return nil
+// Composite: Logical Combination of Queries
+type CompositeFilter struct {
+	LogicalOp LogicalOperator
+	Children  []Query
 }
 
-func (t *InMemoryTable) Select(filters []FilterStrategy) ([]Row, error) {
-	var result []Row
-	for _, row := range t.Rows {
-		match := true
-		for _, f := range filters {
-			if !f.Match(row) {
-				match = false
-				break
+func (cf *CompositeFilter) Evaluate(row map[string]interface{}) bool {
+	switch cf.LogicalOp {
+	case And:
+		for _, child := range cf.Children {
+			if !child.Evaluate(row) {
+				return false
 			}
 		}
-		if match {
+		return true
+	case Or:
+		for _, child := range cf.Children {
+			if child.Evaluate(row) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// Data types
+type ColumnDataType interface {
+	Validate(val interface{}) error
+}
+
+type IntDataType struct {
+	MinValue int
+	MaxValue int
+}
+
+func (i *IntDataType) Validate(val interface{}) error {
+	v, ok := val.(int)
+	if !ok {
+		return errors.New("expected int")
+	}
+	if v < i.MinValue || v > i.MaxValue {
+		return fmt.Errorf("int %d out of bounds (%d-%d)", v, i.MinValue, i.MaxValue)
+	}
+	return nil
+}
+
+type StringDataType struct {
+	AllowNull bool
+}
+
+func (s *StringDataType) Validate(val interface{}) error {
+	v, ok := val.(string)
+	if !ok {
+		return errors.New("expected string")
+	}
+	if !s.AllowNull && v == "" {
+		return errors.New("empty string not allowed")
+	}
+	return nil
+}
+
+type SchemaMember struct {
+	Name     string
+	DataType ColumnDataType
+	Required bool
+}
+
+type Schema struct {
+	Columns map[string]SchemaMember
+}
+
+func NewSchema(members []SchemaMember) *Schema {
+	cols := make(map[string]SchemaMember)
+	for _, m := range members {
+		cols[m.Name] = m
+	}
+	return &Schema{Columns: cols}
+}
+
+func (s *Schema) Validate(row map[string]interface{}) error {
+	for name, member := range s.Columns {
+		val, exists := row[name]
+		if !exists {
+			if member.Required {
+				return fmt.Errorf("missing required field: %s", name)
+			}
+			continue
+		}
+		if err := member.DataType.Validate(val); err != nil {
+			return fmt.Errorf("validation failed for %s: %v", name, err)
+		}
+	}
+	return nil
+}
+
+// Indexing
+type Index struct {
+	ColumnName string
+	IndexMap   map[interface{}]map[int]struct{}
+}
+
+func NewIndex(column string) *Index {
+	return &Index{
+		ColumnName: column,
+		IndexMap:   make(map[interface{}]map[int]struct{}),
+	}
+}
+
+func (idx *Index) Add(value interface{}, id int) {
+	if _, exists := idx.IndexMap[value]; !exists {
+		idx.IndexMap[value] = make(map[int]struct{})
+	}
+	idx.IndexMap[value][id] = struct{}{}
+}
+
+func (idx *Index) Remove(value interface{}, id int) {
+	if rows, exists := idx.IndexMap[value]; exists {
+		delete(rows, id)
+		if len(rows) == 0 {
+			delete(idx.IndexMap, value)
+		}
+	}
+}
+
+// Table
+type Table struct {
+	Name      string
+	Schema    *Schema
+	Data      map[int]map[string]interface{}
+	AutoID    int
+	Indexes   map[string]*Index
+	DataLock  sync.RWMutex
+	IndexLock sync.RWMutex
+}
+
+func NewTable(name string, schema *Schema) *Table {
+	return &Table{
+		Name:    name,
+		Schema:  schema,
+		Data:    make(map[int]map[string]interface{}),
+		Indexes: make(map[string]*Index),
+	}
+}
+
+func (t *Table) Insert(row map[string]interface{}) (int, error) {
+	t.DataLock.Lock()
+	defer t.DataLock.Unlock()
+
+	t.AutoID++
+	row["id"] = t.AutoID
+
+	if err := t.Schema.Validate(row); err != nil {
+		return 0, err
+	}
+	t.Data[t.AutoID] = row
+
+	for col, idx := range t.Indexes {
+		if val, ok := row[col]; ok {
+			idx.Add(val, t.AutoID)
+		}
+	}
+
+	return t.AutoID, nil
+}
+
+func (t *Table) Update(id int, updated map[string]interface{}) error {
+	t.DataLock.Lock()
+	defer t.DataLock.Unlock()
+
+	row, exists := t.Data[id]
+	if !exists {
+		return errors.New("row not found")
+	}
+
+	for k, v := range updated {
+		row[k] = v
+	}
+
+	if err := t.Schema.Validate(row); err != nil {
+		return err
+	}
+
+	for col, idx := range t.Indexes {
+		if val, ok := updated[col]; ok {
+			idx.Remove(row[col], id)
+			idx.Add(val, id)
+		}
+	}
+
+	return nil
+}
+
+func (t *Table) Delete(id int) error {
+	t.DataLock.Lock()
+	defer t.DataLock.Unlock()
+
+	row, exists := t.Data[id]
+	if !exists {
+		return errors.New("row not found")
+	}
+
+	for col, idx := range t.Indexes {
+		if val, ok := row[col]; ok {
+			idx.Remove(val, id)
+		}
+	}
+
+	delete(t.Data, id)
+	return nil
+}
+
+func (t *Table) CreateIndex(column string) {
+	t.IndexLock.Lock()
+	defer t.IndexLock.Unlock()
+
+	idx := NewIndex(column)
+	for id, row := range t.Data {
+		if val, ok := row[column]; ok {
+			idx.Add(val, id)
+		}
+	}
+	t.Indexes[column] = idx
+}
+
+func compare(v1 interface{}, v2 interface{}, op Operator) bool {
+	switch a := v1.(type) {
+	case int:
+		b, _ := v2.(int)
+		switch op {
+		case Eq:
+			return a == b
+		case Gt:
+			return a > b
+		case Lt:
+			return a < b
+		case Gte:
+			return a >= b
+		case Lte:
+			return a <= b
+		}
+	case string:
+		b, _ := v2.(string)
+		switch op {
+		case Eq:
+			return a == b
+		}
+	}
+	return false
+}
+
+// New Query method using Composite
+func (t *Table) Query(q Query) ([]map[string]interface{}, error) {
+	t.DataLock.RLock()
+	defer t.DataLock.RUnlock()
+
+	var result []map[string]interface{}
+	for _, row := range t.Data {
+		if row == nil {
+			continue
+		}
+		if q.Evaluate(row) {
 			result = append(result, row)
 		}
 	}
 	return result, nil
 }
 
-func (t *InMemoryTable) Update(filters []FilterStrategy, updates Row) error {
-	for idx, row := range t.Rows {
-		match := true
-		for _, f := range filters {
-			if !f.Match(row) {
-				match = false
-				break
-			}
-		}
-		if match {
-			for k, v := range updates {
-				row[k] = v
-			}
-			t.Rows[idx] = row
-		}
-	}
-	return nil
-}
-
-func (t *InMemoryTable) Delete(filters []FilterStrategy) error {
-	var newRows []Row
-	for _, row := range t.Rows {
-		match := true
-		for _, f := range filters {
-			if !f.Match(row) {
-				match = false
-				break
-			}
-		}
-		if !match {
-			newRows = append(newRows, row)
-		}
-	}
-	t.Rows = newRows
-	return nil
-}
-
-//////////////////////////////////////////////////////
-// 🏭 Factory Pattern for Table Creation
-//////////////////////////////////////////////////////
-
-func NewInMemoryTable(columns []Column) *InMemoryTable {
-	return &InMemoryTable{
-		Columns: columns,
-		Rows:    []Row{},
-	}
-}
-
-//////////////////////////////////////////////////////
-// 📦 Database Manager (Open-Closed, Dependency Inversion)
-//////////////////////////////////////////////////////
-
+// Database
 type Database struct {
-	Tables map[string]TableRepository
+	Name   string
+	Tables map[string]*Table
 }
 
-func NewDatabase() *Database {
+func NewDatabase(name string) *Database {
 	return &Database{
-		Tables: make(map[string]TableRepository),
+		Name:   name,
+		Tables: make(map[string]*Table),
 	}
 }
 
-func (db *Database) RegisterTable(name string, repo TableRepository) {
-	db.Tables[name] = repo
+func (db *Database) CreateTable(name string, schema *Schema) {
+	db.Tables[name] = NewTable(name, schema)
 }
 
-func (db *Database) GetTable(name string) TableRepository {
-	return db.Tables[name]
+// Server
+type Server struct {
+	Databases map[string]*Database
 }
 
-//////////////////////////////////////////////////////
-// 🚀 MAIN: Usage Example
-//////////////////////////////////////////////////////
+func NewServer() *Server {
+	return &Server{
+		Databases: make(map[string]*Database),
+	}
+}
+
+func (s *Server) CreateDatabase(name string) {
+	s.Databases[name] = NewDatabase(name)
+}
 
 func main() {
-	db := NewDatabase()
+	server := NewServer()
 
-	// Create a "users" table
-	usersTable := NewInMemoryTable([]Column{
-		{"id", "int"},
-		{"name", "string"},
-		{"email", "string"},
+	server.CreateDatabase("testdb")
+	db := server.Databases["testdb"]
+
+	schema := NewSchema([]SchemaMember{
+		{Name: "id", DataType: &IntDataType{MinValue: 0, MaxValue: 10000}, Required: true},
+		{Name: "name", DataType: &StringDataType{AllowNull: false}, Required: true},
+		{Name: "age", DataType: &IntDataType{MinValue: 0, MaxValue: 150}, Required: true},
+		{Name: "city", DataType: &StringDataType{AllowNull: true}, Required: false},
 	})
 
-	db.RegisterTable("users", usersTable)
+	db.CreateTable("users", schema)
+	users := db.Tables["users"]
 
-	users := db.GetTable("users")
-	users.Insert(Row{"id": 1, "name": "Alice", "email": "alice@example.com"})
-	users.Insert(Row{"id": 2, "name": "Bob", "email": "bob@example.com"})
-	users.Insert(Row{"id": 3, "name": "Charlie", "email": "charlie@example.com"})
+	users.Insert(map[string]interface{}{"name": "Alice", "age": 30, "city": "Paris"})
+	users.Insert(map[string]interface{}{"name": "Bob", "age": 25, "city": "London"})
+	users.Insert(map[string]interface{}{"name": "Alice", "age": 35, "city": "Berlin"})
+	users.Insert(map[string]interface{}{"name": "Charlie", "age": 28, "city": "Paris"})
 
-	// SELECT: name = "Alice"
-	fmt.Println("\n🔍 SELECT where name = 'Alice'")
-	results, _ := users.Select([]FilterStrategy{
-		EqualFilter{"name", "Alice"},
-	})
-	fmt.Println(results)
+	// Create Index
+	users.CreateIndex("name")
 
-	// UPDATE: Update email where id = 2
-	fmt.Println("\n✏️ UPDATE email where id = 2")
-	users.Update([]FilterStrategy{
-		EqualFilter{"id", 2},
-	}, Row{"email": "newbob@example.com"})
+	// Build a complex query:
+	// (name == "Alice" AND age > 30) OR (city == "Paris")
+	query := &CompositeFilter{
+		LogicalOp: Or,
+		Children: []Query{
+			&CompositeFilter{
+				LogicalOp: And,
+				Children: []Query{
+					&Condition{Column: "name", Operator: Eq, Value: "Alice"},
+					&Condition{Column: "age", Operator: Gt, Value: 30},
+				},
+			},
+			&Condition{Column: "city", Operator: Eq, Value: "Paris"},
+		},
+	}
 
-	// SELECT ALL
-	fmt.Println("\n📋 SELECT ALL users after update")
-	allResults, _ := users.Select([]FilterStrategy{})
-	fmt.Println(allResults)
-
-	// DELETE: Delete user where name = "Charlie"
-	fmt.Println("\n🗑️ DELETE where name = 'Charlie'")
-	users.Delete([]FilterStrategy{
-		EqualFilter{"name", "Charlie"},
-	})
-
-	// SELECT ALL after delete
-	fmt.Println("\n📋 SELECT ALL users after delete")
-	finalResults, _ := users.Select([]FilterStrategy{})
-	fmt.Println(finalResults)
+	results, _ := users.Query(query)
+	for _, r := range results {
+		fmt.Println(r)
+	}
 }

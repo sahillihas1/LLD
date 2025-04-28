@@ -108,19 +108,36 @@ type PageCommand struct {
 
 func (p *PageCommand) Execute(e *Editor) {
 	pageSize := 5
+
 	if p.up {
-		e.cursor.line -= pageSize
+		// Page Up
+		remainder := e.cursor.line % pageSize
+		if remainder == 0 {
+			e.cursor.line -= pageSize
+		} else {
+			e.cursor.line -= remainder
+		}
 		if e.cursor.line < 0 {
 			e.cursor.line = 0
 		}
 	} else {
-		e.cursor.line += pageSize
+		// Page Down
+		remainder := e.cursor.line % pageSize
+		if remainder == 0 {
+			e.cursor.line += pageSize
+		} else {
+			e.cursor.line += (pageSize - remainder)
+		}
+		// Prevent cursor from exceeding available lines
 		if e.cursor.line >= len(e.lines) {
-			for len(e.lines) <= e.cursor.line {
-				e.lines = append(e.lines, "")
+			e.cursor.line = len(e.lines) - 1
+			if e.cursor.line < 0 {
+				e.cursor.line = 0
 			}
 		}
 	}
+
+	// Adjust column if it exceeds line length
 	if e.cursor.col > len(e.lines[e.cursor.line]) {
 		e.cursor.col = len(e.lines[e.cursor.line])
 	}

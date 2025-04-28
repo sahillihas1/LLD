@@ -46,3 +46,41 @@ func (r *SlidingWindowLimiter) Allow() bool {
 
 	return false
 }
+
+type TokenBucketLimiter struct {
+	mu         sync.Mutex
+	tokens     int
+	capacity   int
+	rate       int // tokens per second
+	lastRefill time.Time
+}
+
+func NewTokenBucketLimiter(rate int, capacity int) *TokenBucketLimiter {
+	return &TokenBucketLimiter{
+		rate:       rate,
+		capacity:   capacity,
+		tokens:     capacity,
+		lastRefill: time.Now(),
+	}
+}
+
+func (t *TokenBucketLimiter) Allow() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(t.lastRefill).Seconds()
+	newTokens := int(elapsed * float64(t.rate))
+
+	if newTokens > 0 {
+		t.tokens = min(t.capacity, t.tokens+newTokens)
+		t.lastRefill = now
+	}
+
+	if t.tokens > 0 {
+		t.tokens--
+		return true
+	}
+
+	return false
+}
